@@ -26,11 +26,12 @@ async function getUFActual() {
 }
 
 /**
- * Consultar RCV usando SimpleAPI
+ * Consultar RCV completo usando SimpleAPI
+ * Devuelve tanto ventas como compras en una sola llamada
  */
-async function consultarRCV(mes, año, tipo, credentials) {
-    // Endpoint SimpleAPI RCV correcto (según documentación)
-    const url = `https://servicios.simpleapi.cl/api/RCV/${tipo}/${mes}/${año}`;
+async function consultarRCV(mes, año, credentials) {
+    // SimpleAPI usa un endpoint único que devuelve ventas Y compras
+    const url = `https://servicios.simpleapi.cl/api/RCV/ventas/${mes}/${año}`;
     
     const body = {
         RutUsuario: credentials.rutUsuario,
@@ -53,7 +54,13 @@ async function consultarRCV(mes, año, tipo, credentials) {
         throw new Error(`Error SimpleAPI: ${response.status} - ${error}`);
     }
     
-    return await response.json();
+    const data = await response.json();
+    
+    // La estructura es: { ventas: { detalleVentas: [...] }, compras: { detalleCompras: [...] } }
+    return {
+        ventas: data.ventas?.detalleVentas || [],
+        compras: data.compras?.detalleCompras || []
+    };
 }
 
 /**
@@ -67,22 +74,22 @@ async function procesarFacturasEmitidas(documentos, ufActual) {
     for (const doc of documentos) {
         try {
             const factura = {
-                numero_folio: doc.Folio,
-                cliente: doc.RazonSocial || 'Cliente',
-                rut_cliente: doc.RutCliente,
-                fecha_emision: doc.FechaEmision,
-                monto_clp: doc.MontoTotal,
-                monto_uf: Math.round((doc.MontoTotal / ufActual) * 100) / 100,
-                estado: 'Emitida',
+                numero_folio: doc.folio,
+                cliente: doc.razonSocial || 'Cliente',
+                rut_cliente: doc.rutCliente,
+                fecha_emision: doc.fechaEmision?.split('T')[0] || null, // Convertir ISO a YYYY-MM-DD
+                monto_clp: doc.montoTotal,
+                monto_uf: Math.round((doc.montoTotal / ufActual) * 100) / 100,
+                estado: doc.estado || 'Emitida',
                 origen: 'SimpleAPI',
-                tipo_documento: doc.TipoDte,
+                tipo_documento: doc.tipoDTE,
                 actualizado_sii: new Date().toISOString()
             };
             
             const { data: existe } = await supabase
                 .from('facturas_emitidas')
                 .select('id')
-                .eq('numero_folio', doc.Folio)
+                .eq('numero_folio', doc.folio)
                 .eq('origen', 'SimpleAPI')
                 .single();
             
@@ -102,13 +109,13 @@ async function procesarFacturasEmitidas(documentos, ufActual) {
                     .insert([factura]);
                 
                 if (error) {
-                    errores.push(`Folio ${doc.Folio}: ${error.message}`);
+                    errores.push(`Folio ${doc.folio}: ${error.message}`);
                 } else {
                     nuevos++;
                 }
             }
         } catch (error) {
-            errores.push(`Folio ${doc.Folio}: ${error.message}`);
+            errores.push(`Folio ${doc.folio}: ${error.message}`);
         }
     }
     
@@ -126,15 +133,15 @@ async function procesarFacturasRecibidas(documentos, ufActual) {
     for (const doc of documentos) {
         try {
             const factura = {
-                numero_folio: doc.Folio,
-                proveedor: doc.RazonSocial || 'Proveedor',
-                rut_proveedor: doc.RutProveedor,
-                fecha_emision: doc.FechaEmision,
-                monto_clp: doc.MontoTotal,
-                monto_uf: Math.round((doc.MontoTotal / ufActual) * 100) / 100,
-                estado: 'Recibida',
+                numero_folio: doc.folio,
+                proveedor: doc.razonSocial || 'Proveedor',
+                rut_proveedor: doc.rutProveedor,
+                fecha_emision: doc.fechaEmision?.split('T')[0] || null, // Convertir ISO a YYYY-MM-DD
+                monto_clp: doc.montoTotal,
+                monto_uf: Math.round((doc.montoTotal / ufActual) * 100) / 100,
+                estado: doc.estado || 'Recibida',
                 origen: 'SimpleAPI',
-                tipo_documento: doc.TipoDte,
+                tipo_documento: doc.tipoDTE,
                 categoria: 'Servicios',
                 actualizado_sii: new Date().toISOString()
             };
@@ -142,7 +149,7 @@ async function procesarFacturasRecibidas(documentos, ufActual) {
             const { data: existe } = await supabase
                 .from('facturas_recibidas')
                 .select('id')
-                .eq('numero_folio', doc.Folio)
+                .eq('numero_folio', doc.folio)
                 .eq('origen', 'SimpleAPI')
                 .single();
             
@@ -162,13 +169,13 @@ async function procesarFacturasRecibidas(documentos, ufActual) {
                     .insert([factura]);
                 
                 if (error) {
-                    errores.push(`Folio ${doc.Folio}: ${error.message}`);
+                    errores.push(`Folio ${doc.folio}: ${error.message}`);
                 } else {
                     nuevos++;
                 }
             }
         } catch (error) {
-            errores.push(`Folio ${doc.Folio}: ${error.message}`);
+            errores.push(`Folio ${doc.folio}: ${error.message}`);
         }
     }
     
@@ -223,23 +230,21 @@ module.exports = async (req, res) => {
         
         const ufActual = await getUFActual();
         
-        // Consultar ventas (facturas emitidas)
-        console.log('Consultando ventas...');
-        const ventas = await consultarRCV(mes, año, 'ventas', credentials);
+        // SimpleAPI devuelve AMBAS (ventas y compras) en una sola llamada
+        console.log('Consultando RCV (ventas y compras)...');
+        const rcv = await consultarRCV(mes, año, credentials);
         
         let resultadoEmitidas = { nuevos: 0, actualizados: 0, errores: [] };
-        if (ventas && Array.isArray(ventas) && ventas.length > 0) {
-            resultadoEmitidas = await procesarFacturasEmitidas(ventas, ufActual);
+        const ventasArray = rcv?.ventas || [];
+        if (ventasArray.length > 0) {
+            resultadoEmitidas = await procesarFacturasEmitidas(ventasArray, ufActual);
             await registrarSync('facturas_emitidas', periodo, resultadoEmitidas, userEmail);
         }
         
-        // Consultar compras (facturas recibidas)
-        console.log('Consultando compras...');
-        const compras = await consultarRCV(mes, año, 'compras', credentials);
-        
         let resultadoRecibidas = { nuevos: 0, actualizados: 0, errores: [] };
-        if (compras && Array.isArray(compras) && compras.length > 0) {
-            resultadoRecibidas = await procesarFacturasRecibidas(compras, ufActual);
+        const comprasArray = rcv?.compras || [];
+        if (comprasArray.length > 0) {
+            resultadoRecibidas = await procesarFacturasRecibidas(comprasArray, ufActual);
             await registrarSync('facturas_recibidas', periodo, resultadoRecibidas, userEmail);
         }
         
@@ -248,13 +253,13 @@ module.exports = async (req, res) => {
             periodo: periodo,
             uf_utilizada: ufActual,
             emitidas: {
-                total: ventas?.length || 0,
+                total: ventasArray.length,
                 nuevas: resultadoEmitidas.nuevos,
                 actualizadas: resultadoEmitidas.actualizados,
                 errores: resultadoEmitidas.errores
             },
             recibidas: {
-                total: compras?.length || 0,
+                total: comprasArray.length,
                 nuevas: resultadoRecibidas.nuevos,
                 actualizadas: resultadoRecibidas.actualizados,
                 errores: resultadoRecibidas.errores
