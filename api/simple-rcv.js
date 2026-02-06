@@ -26,18 +26,16 @@ async function getUFActual() {
 }
 
 /**
- * Consultar RCV completo usando SimpleAPI
- * Devuelve tanto ventas como compras en una sola llamada
+ * Consultar ventas usando SimpleAPI
  */
-async function consultarRCV(mes, año, credentials) {
-    // SimpleAPI usa un endpoint único que devuelve ventas Y compras
+async function consultarVentas(mes, año, credentials) {
     const url = `https://servicios.simpleapi.cl/api/RCV/ventas/${mes}/${año}`;
     
     const body = {
         RutUsuario: credentials.rutUsuario,
         PasswordSII: credentials.passwordSII,
         RutEmpresa: credentials.rutEmpresa,
-        Ambiente: 1 // 1 = producción
+        Ambiente: 1
     };
     
     const response = await fetch(url, {
@@ -51,16 +49,42 @@ async function consultarRCV(mes, año, credentials) {
     
     if (!response.ok) {
         const error = await response.text();
-        throw new Error(`Error SimpleAPI: ${response.status} - ${error}`);
+        throw new Error(`Error SimpleAPI ventas: ${response.status} - ${error}`);
     }
     
     const data = await response.json();
+    return data.ventas?.detalleVentas || [];
+}
+
+/**
+ * Consultar compras usando SimpleAPI
+ */
+async function consultarCompras(mes, año, credentials) {
+    const url = `https://servicios.simpleapi.cl/api/RCV/compras/${mes}/${año}`;
     
-    // La estructura es: { ventas: { detalleVentas: [...] }, compras: { detalleCompras: [...] } }
-    return {
-        ventas: data.ventas?.detalleVentas || [],
-        compras: data.compras?.detalleCompras || []
+    const body = {
+        RutUsuario: credentials.rutUsuario,
+        PasswordSII: credentials.passwordSII,
+        RutEmpresa: credentials.rutEmpresa,
+        Ambiente: 1
     };
+    
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Authorization': credentials.apiKey,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+    });
+    
+    if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Error SimpleAPI compras: ${response.status} - ${error}`);
+    }
+    
+    const data = await response.json();
+    return data.compras?.detalleCompras || [];
 }
 
 /**
@@ -230,21 +254,23 @@ module.exports = async (req, res) => {
         
         const ufActual = await getUFActual();
         
-        // SimpleAPI devuelve AMBAS (ventas y compras) en una sola llamada
-        console.log('Consultando RCV (ventas y compras)...');
-        const rcv = await consultarRCV(mes, año, credentials);
+        // Consultar ventas (facturas emitidas)
+        console.log('Consultando ventas...');
+        const ventas = await consultarVentas(mes, año, credentials);
         
         let resultadoEmitidas = { nuevos: 0, actualizados: 0, errores: [] };
-        const ventasArray = rcv?.ventas || [];
-        if (ventasArray.length > 0) {
-            resultadoEmitidas = await procesarFacturasEmitidas(ventasArray, ufActual);
+        if (ventas.length > 0) {
+            resultadoEmitidas = await procesarFacturasEmitidas(ventas, ufActual);
             await registrarSync('facturas_emitidas', periodo, resultadoEmitidas, userEmail);
         }
         
+        // Consultar compras (facturas recibidas)
+        console.log('Consultando compras...');
+        const compras = await consultarCompras(mes, año, credentials);
+        
         let resultadoRecibidas = { nuevos: 0, actualizados: 0, errores: [] };
-        const comprasArray = rcv?.compras || [];
-        if (comprasArray.length > 0) {
-            resultadoRecibidas = await procesarFacturasRecibidas(comprasArray, ufActual);
+        if (compras.length > 0) {
+            resultadoRecibidas = await procesarFacturasRecibidas(compras, ufActual);
             await registrarSync('facturas_recibidas', periodo, resultadoRecibidas, userEmail);
         }
         
@@ -253,13 +279,13 @@ module.exports = async (req, res) => {
             periodo: periodo,
             uf_utilizada: ufActual,
             emitidas: {
-                total: ventasArray.length,
+                total: ventas.length,
                 nuevas: resultadoEmitidas.nuevos,
                 actualizadas: resultadoEmitidas.actualizados,
                 errores: resultadoEmitidas.errores
             },
             recibidas: {
-                total: comprasArray.length,
+                total: compras.length,
                 nuevas: resultadoRecibidas.nuevos,
                 actualizadas: resultadoRecibidas.actualizados,
                 errores: resultadoRecibidas.errores
