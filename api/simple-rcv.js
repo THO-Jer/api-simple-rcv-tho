@@ -99,6 +99,7 @@ async function procesarFacturasEmitidas(documentos, ufActual) {
         try {
             const factura = {
                 numero_folio: doc.folio,
+                numero_factura: doc.folio, // El folio ES el número de factura
                 cliente: doc.razonSocial || 'Cliente',
                 rut_cliente: doc.rutCliente,
                 fecha_emision: doc.fechaEmision?.split('T')[0] || null, // Convertir ISO a YYYY-MM-DD
